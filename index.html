@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>長野県 橋梁マップ AI アシスタント</title>
+  <script type="module" src="https://js.arcgis.com/5.0/"></script>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: sans-serif; }
+    #app { display: none; height: 100%; }   /* サインイン後に表示 */
+    arcgis-map { height: 100%; }
+    #login { padding: 2rem; }
+  </style>
+</head>
+<body>
+  <!-- サインイン前 -->
+  <div id="login">
+    <p>組織アカウントでサインインしてください。</p>
+    <button id="sign-in">サインイン</button>
+  </div>
+
+  <!-- サインイン後に表示するアプリ本体 -->
+  <calcite-shell id="app">
+    <arcgis-map id="map">
+      <arcgis-zoom slot="top-left"></arcgis-zoom>
+      <arcgis-expand slot="top-left"><arcgis-legend></arcgis-legend></arcgis-expand>
+    </arcgis-map>
+    <calcite-shell-panel slot="panel-end" width="l">
+      <calcite-panel heading="橋梁アシスタント">
+        <arcgis-assistant
+          log-enabled copy-enabled
+          reference-element="#map"
+          heading="橋梁アシスタント"
+          description="長野県の橋梁の諸元・点検結果を自然言語で調べられます">
+          <arcgis-assistant-navigation-agent></arcgis-assistant-navigation-agent>
+          <arcgis-assistant-data-exploration-agent></arcgis-assistant-data-exploration-agent>
+          <arcgis-assistant-help-agent></arcgis-assistant-help-agent>
+        </arcgis-assistant>
+      </calcite-panel>
+    </calcite-shell-panel>
+  </calcite-shell>
+
+  <script type="module">
+    // ===== ここだけ書き換える =====
+    const PORTAL_URL = "https://nagano-giken.maps.arcgis.com/"; // 組織URL
+    const APP_ID     = "iVvy4tEzINSZda0X";
+    const WEBMAP_ID  = "72ffe852027c4716b3b9b8dfafc067fa";
+    // ==============================
+
+    // CDN では $arcgis.import でモジュール取得
+    const [OAuthInfo, esriId] = await $arcgis.import([
+      "@arcgis/core/identity/OAuthInfo.js",
+      "@arcgis/core/identity/IdentityManager.js",
+    ]);
+
+    const info = new OAuthInfo({
+      appId: APP_ID,
+      portalUrl: PORTAL_URL,
+      popup: false,          // リダイレクト方式：単一ファイルで完結
+      preserveUrlHash: true, // 復帰後にURLハッシュを復元
+    });
+    esriId.registerOAuthInfos([info]);
+
+    const loginEl = document.getElementById("login");
+    const appEl   = document.getElementById("app");
+
+    // アプリ表示＋Webマップ読込。認証競合を避けるため item-id はサインイン確定後にセット
+    function startApp() {
+      loginEl.style.display = "none";
+      appEl.style.display   = "block";
+      document.getElementById("map").setAttribute("item-id", WEBMAP_ID);
+    }
+
+    // 既にサインイン済みか確認。未サインインならボタンで誘導
+    try {
+      await esriId.checkSignInStatus(PORTAL_URL + "/sharing");
+      startApp();
+    } catch {
+      document.getElementById("sign-in").addEventListener("click", () => {
+        // リダイレクト方式ではここで組織のサインインページへ遷移し、戻ると上のcheckが通る
+        esriId.getCredential(PORTAL_URL + "/sharing");
+      });
+    }
+  </script>
+</body>
+</html>
