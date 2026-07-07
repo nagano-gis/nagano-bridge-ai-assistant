@@ -4,12 +4,33 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>長野県 橋梁マップ AI アシスタント</title>
+
+  <!-- Chart.js（クラシックscript：moduleより先に実行される） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+  <!-- ArcGIS Maps SDK for JavaScript 5.0 -->
   <script type="module" src="https://js.arcgis.com/5.0/"></script>
+
   <style>
     html, body { height: 100%; margin: 0; font-family: sans-serif; }
-    #app { display: none; height: 100%; }   /* サインイン後に表示 */
-    arcgis-map { height: 100%; }
     #login { padding: 2rem; }
+
+    /* 地図｜チャート帯｜アシスタント の3列レイアウト */
+    #app { display: none; height: 100%; }
+    #app.show { display: flex; }
+    #map { flex: 1 1 auto; height: 100%; }
+    #charts {
+      flex: 0 0 360px; height: 100%; overflow-y: auto;
+      border-left: 1px solid #ddd; background: #fafafa; padding: 8px;
+      box-sizing: border-box;
+    }
+    #assistant-wrap { flex: 0 0 400px; height: 100%; border-left: 1px solid #ddd; }
+    #assistant-wrap arcgis-assistant { height: 100%; }
+
+    .chart-card { background: #fff; border: 1px solid #eee; border-radius: 6px; margin-bottom: 10px; padding: 6px 8px; }
+    .chart-title { font-size: 12px; font-weight: 600; color: #333; margin: 2px 0 4px; }
+    .chart-box { position: relative; height: 190px; }
+    .chart-box.tall { height: 320px; }   /* ヒストグラム系は縦長 */
+    #charts-status { font-size: 11px; color: #888; padding: 2px 4px 8px; }
   </style>
 </head>
 <body>
@@ -20,12 +41,26 @@
   </div>
 
   <!-- サインイン後に表示するアプリ本体 -->
-  <calcite-shell id="app">
+  <div id="app">
+    <!-- 地図（item-id はサインイン確定後にセット） -->
     <arcgis-map id="map">
       <arcgis-zoom slot="top-left"></arcgis-zoom>
       <arcgis-expand slot="top-left"><arcgis-legend></arcgis-legend></arcgis-expand>
     </arcgis-map>
-    <calcite-shell-panel slot="panel-end" width="l">
+
+    <!-- チャート帯（地図とアシスタントの間） -->
+    <div id="charts">
+      <div id="charts-status">読み込み中…</div>
+      <div class="chart-card"><div class="chart-title">判定区分別 橋梁数</div><div class="chart-box"><canvas id="c-hantei"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">措置状況別 橋梁数</div><div class="chart-box"><canvas id="c-sochi"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">管理者区分別 橋梁数</div><div class="chart-box"><canvas id="c-kanrisya"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">年度別 点検数</div><div class="chart-box"><canvas id="c-tenken"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">橋長</div><div class="chart-box tall"><canvas id="c-kyouchou"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">架設年代</div><div class="chart-box tall"><canvas id="c-kasetsu"></canvas></div></div>
+    </div>
+
+    <!-- アシスタント -->
+    <div id="assistant-wrap">
       <calcite-panel heading="橋梁アシスタント">
         <arcgis-assistant
           log-enabled copy-enabled
@@ -37,49 +72,232 @@
           <arcgis-assistant-help-agent></arcgis-assistant-help-agent>
         </arcgis-assistant>
       </calcite-panel>
-    </calcite-shell-panel>
-  </calcite-shell>
+    </div>
+  </div>
 
   <script type="module">
-    // ===== ここだけ書き換える =====
-    const PORTAL_URL = "https://nagano-giken.maps.arcgis.com/"; // 組織URL
-    const APP_ID     = "iVvy4tEzINSZda0X";
-    const WEBMAP_ID  = "72ffe852027c4716b3b9b8dfafc067fa";
-    // ==============================
+    // ===== 書き換えるのは PORTAL_URL と APP_ID の2つ（今動いている index.html からコピー） =====
+    const PORTAL_URL = "https://＜あなたの組織＞.maps.arcgis.com";  // 組織URL
+    const APP_ID     = "＜Client ID＞";                             // OAuthクレデンシャル
+    const WEBMAP_ID  = "72ffe852027c4716b3b9b8dfafc067fa";          // 橋梁Webマップ（確定済み）
+    const LAYER_TITLE = "nagano_road_bridges";                     // 対象レイヤ名
+    // =========================================================================================
 
-    // CDN では $arcgis.import でモジュール取得
-    const [OAuthInfo, esriId] = await $arcgis.import([
+    const [OAuthInfo, esriId, reactiveUtils] = await $arcgis.import([
       "@arcgis/core/identity/OAuthInfo.js",
       "@arcgis/core/identity/IdentityManager.js",
+      "@arcgis/core/core/reactiveUtils.js",
     ]);
 
-    const info = new OAuthInfo({
-      appId: APP_ID,
-      portalUrl: PORTAL_URL,
-      popup: false,          // リダイレクト方式：単一ファイルで完結
-      preserveUrlHash: true, // 復帰後にURLハッシュを復元
-    });
-    esriId.registerOAuthInfos([info]);
+    // ---- OAuth（リダイレクト方式：単一ファイルで完結） ----
+    esriId.registerOAuthInfos([ new OAuthInfo({
+      appId: APP_ID, portalUrl: PORTAL_URL, popup: false, preserveUrlHash: true,
+    }) ]);
 
     const loginEl = document.getElementById("login");
     const appEl   = document.getElementById("app");
+    const mapEl   = document.getElementById("map");
 
-    // アプリ表示＋Webマップ読込。認証競合を避けるため item-id はサインイン確定後にセット
-    function startApp() {
-      loginEl.style.display = "none";
-      appEl.style.display   = "block";
-      document.getElementById("map").setAttribute("item-id", WEBMAP_ID);
-    }
-
-    // 既にサインイン済みか確認。未サインインならボタンで誘導
     try {
       await esriId.checkSignInStatus(PORTAL_URL + "/sharing");
       startApp();
     } catch {
       document.getElementById("sign-in").addEventListener("click", () => {
-        // リダイレクト方式ではここで組織のサインインページへ遷移し、戻ると上のcheckが通る
         esriId.getCredential(PORTAL_URL + "/sharing");
       });
+    }
+
+    function startApp() {
+      loginEl.style.display = "none";
+      appEl.classList.add("show");
+      mapEl.setAttribute("item-id", WEBMAP_ID);   // 認証確定後にセット
+      initChartsSync();
+    }
+
+    // ---- view / layerView の準備を待つ ----
+    function whenViewReady(el) {
+      return new Promise(resolve => {
+        if (el.ready && el.view) return resolve(el.view);
+        el.addEventListener("arcgisViewReadyChange", () => {
+          if (el.ready && el.view) resolve(el.view);
+        });
+      });
+    }
+
+    // ===================== チャート本体 =====================
+    const PALETTE = ["#7ececa","#bfe08a","#f4b183","#f2999a","#c9b7e8","#9ec9e8","#f6d76b","#a9d6a0"];
+    let charts = {};
+
+    function makeChart(id, type, opts = {}) {
+      const ctx = document.getElementById(id).getContext("2d");
+      return new Chart(ctx, {
+        type,
+        data: { labels: [], datasets: [{ data: [], backgroundColor: PALETTE, borderColor: "#7ececa", borderWidth: type === "line" ? 2 : 0, fill: false, tension: 0.3 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          ...opts,
+        },
+      });
+    }
+
+    function buildCharts() {
+      charts.hantei   = makeChart("c-hantei", "bar");
+      charts.sochi    = makeChart("c-sochi", "bar");
+      charts.kanrisya = makeChart("c-kanrisya", "bar");
+      charts.tenken   = makeChart("c-tenken", "line");
+      charts.kyouchou = makeChart("c-kyouchou", "bar", { indexAxis: "y" });  // 横棒ヒストグラム
+      charts.kasetsu  = makeChart("c-kasetsu", "bar", { indexAxis: "y" });
+    }
+
+    function applyData(chart, labels, data) {
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = data;
+      chart.update();
+    }
+
+    // 指定した並び順にカテゴリ集計を整える（順序外のキーは末尾に追加）
+    function ordered(rows, keyOrder) {
+      const map = new Map(rows.map(r => [String(r.key), r.count]));
+      const labels = [...keyOrder];
+      keyOrder.forEach(k => map.delete(k));
+      for (const k of map.keys()) labels.push(k);   // 想定外の値も拾う
+      const data = labels.map(k => {
+        const hit = rows.find(r => String(r.key) === k);
+        return hit ? hit.count : 0;
+      });
+      return { labels, data };
+    }
+
+    let layer, lv;
+
+    async function initChartsSync() {
+      const view = await whenViewReady(mapEl);
+      await view.when();
+
+      // 対象レイヤを名前で特定（複数レイヤが載っているため必須）
+      layer = view.map.allLayers.find(l => l.title === LAYER_TITLE)
+           ?? view.map.allLayers.find(l => l.type === "feature" && (l.fields || []).some(f => f.name === "hantei_label"));
+      if (!layer) { document.getElementById("charts-status").textContent = "橋梁レイヤが見つかりません"; return; }
+      await layer.load();
+      lv = await view.whenLayerView(layer);
+
+      buildCharts();
+
+      // エージェントが設定する featureEffect.filter.where の変化を監視して再描画
+      const debounced = debounce(refreshAll, 250);
+      reactiveUtils.watch(() => lv.featureEffect?.filter?.where ?? "", debounced);
+      refreshAll();   // 初期表示（フィルタなし）
+    }
+
+    // 現在のフィルタ条件（エージェントのエフェクト）。無ければ全件
+    function currentWhere() {
+      const w = lv.featureEffect?.filter?.where;
+      return (w && w.trim()) ? w : "1=1";
+      // ※ definitionExpression（長野県ベース等）はクエリで自動的に尊重されるため、ここでは付けない
+    }
+
+    // カテゴリ集計（groupBy）
+    async function groupCount(field, where) {
+      const q = layer.createQuery();
+      q.where = where;
+      q.outStatistics = [{ statisticType: "count", onStatisticField: layer.objectIdField, outStatisticFieldName: "cnt" }];
+      q.groupByFieldsForStatistics = [field];
+      const { features } = await layer.queryFeatures(q);
+      return features
+        .filter(f => f.attributes[field] != null && f.attributes[field] !== "")
+        .map(f => ({ key: f.attributes[field], count: f.attributes.cnt }));
+    }
+
+    // 数値列を取得（ヒストグラム用。maxRecordCount を超える場合はページング）
+    async function fetchColumn(field, where) {
+      const values = [];
+      const page = 2000;
+      let start = 0, got = 0;
+      do {
+        const q = layer.createQuery();
+        q.where = where;
+        q.outFields = [field];
+        q.returnGeometry = false;
+        q.num = page;
+        q.start = start;
+        q.orderByFields = [layer.objectIdField];  // ページングの安定化
+        const { features } = await layer.queryFeatures(q);
+        got = features.length;
+        for (const f of features) { const v = f.attributes[field]; if (v != null) values.push(v); }
+        start += page;
+      } while (got === page);
+      return values;
+    }
+
+    // 橋長ビン（0-10, 10-20 ... 900-1000, >1000）
+    const KYO_EDGES  = [10,20,30,40,50,60,70,80,90,100,200,300,400,500,600,700,800,900,1000];
+    const KYO_LABELS = ["<10m","<20m","<30m","<40m","<50m","<60m","<70m","<80m","<90m","<100m","<200m","<300m","<400m","<500m","<600m","<700m","<800m","<900m","<1000m",">1000m"];
+    function binKyouchou(values) {
+      const counts = new Array(KYO_LABELS.length).fill(0);
+      for (const v of values) {
+        let i = KYO_EDGES.findIndex(e => v < e);
+        if (i === -1) i = KYO_LABELS.length - 1;   // >=1000
+        counts[i]++;
+      }
+      return { labels: KYO_LABELS, data: counts };
+    }
+
+    // 架設年代ビン（1900〜2020の10年刻み）
+    const DEC_LABELS = ["1900","1910","1920","1930","1940","1950","1960","1970","1980","1990","2000","2010","2020"];
+    function binKasetsu(values) {
+      const idx = {}; DEC_LABELS.forEach((l, i) => idx[l] = i);
+      const counts = new Array(DEC_LABELS.length).fill(0);
+      for (const v of values) {
+        let dec = Math.floor(v / 10) * 10;
+        if (dec < 1900) dec = 1900;
+        if (dec > 2020) dec = 2020;
+        counts[idx[String(dec)]]++;
+      }
+      return { labels: DEC_LABELS, data: counts };
+    }
+
+    async function refreshAll() {
+      const where = currentWhere();
+      const status = document.getElementById("charts-status");
+      status.textContent = where === "1=1" ? "全件を表示中" : "フィルタ結果を表示中: " + where;
+      try {
+        const [hantei, sochi, kanrisya, tenken, kyoVals, kasVals] = await Promise.all([
+          groupCount("hantei_label", where),
+          groupCount("sochi_label", where),
+          groupCount("kanrisya_kubun_label", where),
+          groupCount("tenken_nendo", where),
+          fetchColumn("kyouchou", where),
+          fetchColumn("kasetsu_nendo", where),
+        ]);
+
+        // 判定区分：意味の順で並べる
+        const h = ordered(hantei, ["健全","予防保全段階","早期措置段階","緊急措置段階","未点検"]);
+        applyData(charts.hantei, h.labels, h.data);
+
+        // 措置状況：データ駆動（件数降順）
+        sochi.sort((a, b) => b.count - a.count);
+        applyData(charts.sochi, sochi.map(r => r.key), sochi.map(r => r.count));
+
+        // 管理者区分：意味の順
+        const k = ordered(kanrisya, ["国","都道府県","道路公社","政令市","市区町村","高速道路会社"]);
+        applyData(charts.kanrisya, k.labels, k.data);
+
+        // 点検年度：年で昇順
+        tenken.sort((a, b) => Number(a.key) - Number(b.key));
+        applyData(charts.tenken, tenken.map(r => String(r.key)), tenken.map(r => r.count));
+
+        // ヒストグラム2種
+        const kyo = binKyouchou(kyoVals); applyData(charts.kyouchou, kyo.labels, kyo.data);
+        const kas = binKasetsu(kasVals);  applyData(charts.kasetsu, kas.labels, kas.data);
+      } catch (e) {
+        console.warn("chart refresh error", e);
+        status.textContent = "チャート更新でエラー（コンソール参照）";
+      }
+    }
+
+    function debounce(fn, ms) {
+      let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
     }
   </script>
 </body>
